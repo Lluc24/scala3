@@ -3224,6 +3224,19 @@ class TypeComparer(@constructorOnly initctx: Context) extends ConstraintHandling
     end match
   }
 
+  def isErrorType(tp: Type): Boolean = tp match
+    case tp: TypeRef => false
+    case tp: AppliedType => false
+    case tp: TermRef => false
+    case tp: AndOrType => false
+    case tp: ConstantType => false
+    case tp: HKTypeLambda => false
+    case tp: ParamRef => false
+    case tp: TypeProxy => isErrorType(tp.superTypeNormalized)
+    case tp: WildcardType => false
+    case tp: ErrorType => true
+    case tp: NoType.type => false
+
   /** Are `cls1` and `cls1` provablyDisjoint classes, i.e., is `cls1 ⋔ cls2` true?
    *
    *  Note that "class" where includes traits, module classes, and (in the recursive case)
@@ -3666,16 +3679,18 @@ class MatchReducer(initctx: Context) extends TypeComparer(initctx) {
     }
 
     def matchSubTypeTest(spec: MatchTypeCaseSpec.SubTypeTest): MatchResult =
-      val disjoint = provablyDisjoint(scrut, spec.pattern)
-      if necessarySubType(scrut, spec.pattern) then
-        if disjoint then
-          MatchResult.ReducedAndDisjoint
-        else
-          MatchResult.Reduced(spec.body)
-      else if disjoint then
-        MatchResult.Disjoint
+      if isErrorType(spec.pattern) then MatchResult.Stuck
       else
-        MatchResult.Stuck
+        val disjoint = provablyDisjoint(scrut, spec.pattern)
+        if necessarySubType(scrut, spec.pattern) then
+          if disjoint then
+            MatchResult.ReducedAndDisjoint
+          else
+            MatchResult.Reduced(spec.body)
+        else if disjoint then
+          MatchResult.Disjoint
+        else
+          MatchResult.Stuck
     end matchSubTypeTest
 
     // See https://docs.scala-lang.org/sips/match-types-spec.html#matching

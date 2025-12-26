@@ -45,8 +45,7 @@ import Capabilities.*
 import transform.Recheck.currentRechecker
 import scala.collection.immutable.HashMap
 import dotty.tools.dotc.util.Property
-import dotty.tools.dotc.reporting.IncreasingMatchReduction
-import dotty.tools.dotc.reporting.CyclicMatchTypeReduction
+import dotty.tools.dotc.reporting.*
 
 import scala.annotation.internal.sharable
 import scala.annotation.threadUnsafe
@@ -1636,35 +1635,48 @@ object Types extends TypeUtils {
     def tryNormalize(using Context): Type = underlyingNormalizable match
       case mt: MatchType =>
         this match
-          case self: AppliedType =>
-            report.log(i"AppliedType with underlying MatchType: ${self.tycon}${self.args}")
-            val history = ctx.property(Reduction).getOrElse(Map.empty)
-            val decision: Either[ErrorType, List[List[Type]]] =
-              if history.contains(self.tycon) then
-                val stack = history(self.tycon) // Stack is non-empty
-                report.log(i"Match type reduction history for ${self.tycon}: $stack")
-                val currentArgsSize = self.args.map(_.typeSize)
-                val prevArgsSize = stack.head.map(_.typeSize)
-                val listOrd = scala.math.Ordering.Implicits.seqOrdering[Seq, Int]
-                if listOrd.gt(currentArgsSize, prevArgsSize) then
-                  Left(ErrorType(IncreasingMatchReduction(self.tycon, stack.head, prevArgsSize, self.args, currentArgsSize)))
-                else if listOrd.equiv(currentArgsSize, prevArgsSize) then
-                  if stack.contains(self.args) then
-                    Left(ErrorType(CyclicMatchTypeReduction(self.tycon, self.args, currentArgsSize, stack)))
-                  else Right(self.args :: stack)
-                else Right(self.args :: Nil) // currentArgsSize < prevArgsSize
-              else Right(self.args :: Nil)
-            decision match
-              case Left(err) => err
-              case Right(stack) =>
-                val newHistory = history.updated(self.tycon, stack)
-                val result =
-                  given Context = ctx.fresh.setProperty(Reduction, newHistory)
-                  mt.reduced.normalized
-                result
+          case self: AppliedType => guardedReduce(self, mt)
           case _ => mt.reduced.normalized
       case tp: AppliedType => tp.tryCompiletimeConstantFold
       case _ => NoType
+
+    def guardedReduce(self: AppliedType, mt: MatchType)(using Context): Type =
+      val history = ctx.property(Reduction).getOrElse(Map.empty)
+      val stack = history.getOrElse(self.tycon, Nil)
+      checkMTDivergence(self, stack) match
+        case Left(msg) => ErrorType(msg)
+        case Right(_) =>
+          val newHistory = history.updated(self.tycon, self.args :: stack)
+          val result =
+            given Context = ctx.fresh.setProperty(Reduction, newHistory)
+            mt.reduced.normalized
+          result
+
+    def checkMTDivergence(self: AppliedType, stack: List[List[Type]])(using Context): Either[TypeMsg, Unit] =
+      report.log(i"${self.tycon}${self.args}: stack: $stack (length ${stack.length})")
+      @tailrec
+      def loop(remaining: List[List[Type]]): Either[TypeMsg, Unit] = remaining match
+        case Nil => Right(())
+        case prevArgs :: rest =>
+          val listOrd = scala.math.Ordering.Implicits.seqOrdering[Seq, Int]
+          val curArgsSize = self.args.map(_.structuralTypeSize)
+          val prevArgsSize = prevArgs.map(_.structuralTypeSize)
+          val order = listOrd.compare(curArgsSize, prevArgsSize)
+          val currentCS = self.coveringSet
+          val prevCS = self.tycon.appliedTo(prevArgs).coveringSet
+          report.log(i"${self.tycon}${self.args}: args=${self.args} prevArgs=${prevArgs} order=${order} argsSize=${curArgsSize} " +
+            i"prevArgsSize=${prevArgsSize} CS=${currentCS.map(_.name).toList.sorted} prevCS=${prevCS.map(_.name).toList.sorted}")
+          if order > 0 && currentCS == prevCS then
+            val err = IncreasingMatchReduction(self.tycon, prevArgs, prevArgsSize, self.args, curArgsSize, currentCS, self.args :: stack)
+            report.error(err, self.typeSymbol.sourcePos)
+            Left(err)
+          else if self.args.corresponds(prevArgs)(_ =:= _) then
+            val err = CyclicMatchTypeReduction(self.tycon, self.args, curArgsSize, self.args :: stack)
+            report.error(err, self.typeSymbol.sourcePos)
+            Left(err)
+          else
+            loop(rest)
+      loop(stack)
 
     /** Perform successive strippings, and beta-reductions of applied types until
      *  a match type or applied compiletime.ops is reached, if any, otherwise NoType.
@@ -2131,6 +2143,9 @@ object Types extends TypeUtils {
     /** The number of applications and refinements in this type, after all aliases are expanded */
     def typeSize(using Context): Int =
       (new TypeSizeAccumulator).apply(0, this)
+
+    def structuralTypeSize(using Context): Int =
+      (new StructuralTypeSizeAccumulator).apply(0, this)
 
     /** Convert to text */
     def toText(printer: Printer): Text = printer.toText(this)
@@ -7153,6 +7168,13 @@ object Types extends TypeUtils {
         case _ => foldOver(x, tp)
       }
     }
+  }
+
+  class StructuralTypeSizeAccumulator(using Context) extends TypeSizeAccumulator {
+    override def apply(n: Int, tp: Type): Int =
+      if tp.isMatchAlias then
+        foldOver(n + 1, tp)
+      else super.apply(n, tp)
   }
 
   class TypeSizeAccumulator(using Context) extends TypeAccumulator[Int] {

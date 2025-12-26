@@ -3321,30 +3321,40 @@ class MatchTypeLegacyPattern(errorText: String)(using Context) extends TypeMsg(M
   def msg(using Context) = errorText
   def explain(using Context) = ""
 
-class IncreasingMatchReduction(tpcon: Type, prevArgs: List[Type], prevSize: List[Int], curArgs: List[Type], curSize: List[Int])(using Context)
+class IncreasingMatchReduction(tpcon: Type, prevArgs: List[Type], prevSize: List[Int], curArgs: List[Type], curSize: List[Int], cs: Set[Symbol], stack: List[List[Type]])(using Context)
   extends TypeMsg(IncreasingMatchReductionID):
   def msg(using Context) =
-    i"""Match type reduction failed due to potentially infinite recursion.
+    val trace: String = stack.reverse.map(a => i"${tpcon}${a}").mkString(" -> ")
+    i"""Match type reduction failed due to potentially infinite recursion in the reduction steps.
        |
-       |The reduction step for $tpcon resulted in strictly larger arguments (lexicographically):
+       |Trace: $trace"""
+  def explain(using Context) =
+    i"""The reduction step for $tpcon resulted in strictly larger arguments size (lexicographically)
+       |with the same covering set:
        |  Previous: $prevArgs (size: $prevSize)
        |  Current:  $curArgs (size: $curSize)
+       |  Covering set: ${cs.map(_.name).toList.sorted}
        |
-       |To guarantee termination, recursive match types must strictly decrease in size
-       |or stay the same (without cycles)."""
-  def explain(using Context) = ""
+       |The two situations that are prohibited are:
+       |  1. Size increases with the same covering set
+       |  2. Arguments are repeated
+       |This Match Type reduction step falls under case 1."""
 
 class CyclicMatchTypeReduction(tpcon: Type, args: List[Type], argsSize: List[Int], stack: List[List[Type]])(using Context)
   extends TypeMsg(CyclicMatchTypeReductionID):
   def msg(using Context) =
-    val trace: String = stack.map(a => i"${tpcon}${a}").mkString(" -> ")
-    i"""Match type reduction failed due to a cycle.
-       |
-       |The match type $tpcon reduced to itself with the same arguments:
-       |$args
+    val trace: String = stack.reverse.map(a => i"${tpcon}${a}").mkString(" -> ")
+    i"""Match type reduction failed due to a cycle in the reduction steps."
        |
        |Trace: $trace"""
-  def explain(using Context) = ""
+  def explain(using Context) =
+    i"""The reduction step for $tpcon resulted in previously seen arguments:
+       |  Arguments:  $args (size: $argsSize)
+       |
+       |The two situations that are prohibited are:
+       |  1. Size increases with the same covering set
+       |  2. Arguments are repeated
+       |This Match Type reduction step falls under case 2."""
 
 class ClosureCannotHaveInternalParameterDependencies(mt: Type)(using Context)
   extends TypeMsg(ClosureCannotHaveInternalParameterDependenciesID):
